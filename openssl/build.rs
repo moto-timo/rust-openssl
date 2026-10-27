@@ -53,6 +53,7 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(ossl340)");
     println!("cargo:rustc-check-cfg=cfg(ossl350)");
     println!("cargo:rustc-check-cfg=cfg(ossl400)");
+    println!("cargo:rustc-check-cfg=cfg(ossl410)");
 
     if env::var("DEP_OPENSSL_LIBRESSL").is_ok() {
         println!("cargo:rustc-cfg=libressl");
@@ -166,6 +167,9 @@ fn main() {
         }
         if version >= 0x4_00_00_00_0 {
             println!("cargo:rustc-cfg=ossl400");
+        }
+        if version >= 0x4_01_00_00_0 {
+            println!("cargo:rustc-cfg=ossl410");
         }
     }
 }

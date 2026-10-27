@@ -764,6 +764,14 @@ impl SslVersion {
     ///
     /// DTLS 1.2 corresponds to TLS 1.2 to harmonize versions. There was never a DTLS 1.1.
     pub const DTLS1_2: SslVersion = SslVersion(ffi::DTLS1_2_VERSION);
+
+    /// DTLSv1.3
+    ///
+    /// DTLS 1.3 corresponds to TLS 1.3.
+    ///
+    /// Requires OpenSSL 4.1.0 or newer.
+    #[cfg(ossl410)]
+    pub const DTLS1_3: SslVersion = SslVersion(ffi::DTLS1_3_VERSION);
 }
 
 cfg_if! {

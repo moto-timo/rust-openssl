@@ -414,6 +414,9 @@ fn test_connect_with_srtp_ctx() {
             .unwrap();
 
         stream.write_all(&[0]).unwrap();
+        // Hold the stream open until the client is done: under DTLS 1.3 its
+        // read sends ACKs, which fail with EPIPE if this side has closed.
+        stream.read_exact(&mut [0]).unwrap();
 
         buf
     });
@@ -438,6 +441,7 @@ fn test_connect_with_srtp_ctx() {
         .expect("extract");
 
     stream.read_exact(&mut [0]).unwrap();
+    stream.write_all(&[0]).unwrap();
 
     let buf2 = guard.join().unwrap();
 
@@ -483,6 +487,9 @@ fn test_connect_with_srtp_ssl() {
             .unwrap();
 
         stream.write_all(&[0]).unwrap();
+        // Hold the stream open until the client is done: under DTLS 1.3 its
+        // read sends ACKs, which fail with EPIPE if this side has closed.
+        stream.read_exact(&mut [0]).unwrap();
 
         buf
     });
@@ -507,6 +514,7 @@ fn test_connect_with_srtp_ssl() {
         .expect("extract");
 
     stream.read_exact(&mut [0]).unwrap();
+    stream.write_all(&[0]).unwrap();
 
     let buf2 = guard.join().unwrap();
 

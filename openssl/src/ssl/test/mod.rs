@@ -42,7 +42,19 @@ mod server;
 
 static ROOT_CERT: &[u8] = include_bytes!("../../../test/root-ca.pem");
 static CERT: &[u8] = include_bytes!("../../../test/cert.pem");
+static SAN_CERT: &[u8] = include_bytes!("../../../test/cert_san.pem");
 static KEY: &[u8] = include_bytes!("../../../test/key.pem");
+
+/// A `Server` builder whose certificate names `foobar.com` in its
+/// subjectAltName, as hostname verification requires on OpenSSL 4.1 and newer.
+fn san_server() -> server::Builder {
+    let mut server = Server::builder();
+    server
+        .ctx()
+        .set_certificate_chain_file("test/cert_san.pem")
+        .unwrap();
+    server
+}
 
 #[test]
 fn verify_untrusted() {
@@ -402,6 +414,9 @@ fn test_connect_with_srtp_ctx() {
             .unwrap();
 
         stream.write_all(&[0]).unwrap();
+        // Hold the stream open until the client is done: under DTLS 1.3 its
+        // read sends ACKs, which fail with EPIPE if this side has closed.
+        stream.read_exact(&mut [0]).unwrap();
 
         buf
     });
@@ -426,6 +441,7 @@ fn test_connect_with_srtp_ctx() {
         .expect("extract");
 
     stream.read_exact(&mut [0]).unwrap();
+    stream.write_all(&[0]).unwrap();
 
     let buf2 = guard.join().unwrap();
 
@@ -471,6 +487,9 @@ fn test_connect_with_srtp_ssl() {
             .unwrap();
 
         stream.write_all(&[0]).unwrap();
+        // Hold the stream open until the client is done: under DTLS 1.3 its
+        // read sends ACKs, which fail with EPIPE if this side has closed.
+        stream.read_exact(&mut [0]).unwrap();
 
         buf
     });
@@ -495,6 +514,7 @@ fn test_connect_with_srtp_ssl() {
         .expect("extract");
 
     stream.read_exact(&mut [0]).unwrap();
+    stream.write_all(&[0]).unwrap();
 
     let buf2 = guard.join().unwrap();
 
@@ -726,7 +746,7 @@ fn add_extra_chain_cert() {
 #[test]
 #[cfg(ossl110)]
 fn verify_valid_hostname() {
-    let server = Server::builder().build();
+    let server = san_server().build();
 
     let mut client = server.client();
     client.ctx().set_ca_file("test/root-ca.pem").unwrap();
@@ -744,7 +764,7 @@ fn verify_valid_hostname() {
 #[test]
 #[cfg(ossl110)]
 fn verify_invalid_hostname() {
-    let mut server = Server::builder();
+    let mut server = san_server();
     server.should_error();
     let server = server.build();
 
@@ -763,7 +783,7 @@ fn verify_invalid_hostname() {
 
 #[test]
 fn connector_valid_hostname() {
-    let server = Server::builder().build();
+    let server = san_server().build();
 
     let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
     connector.set_ca_file("test/root-ca.pem").unwrap();
@@ -775,7 +795,7 @@ fn connector_valid_hostname() {
 
 #[test]
 fn connector_invalid_hostname() {
-    let mut server = Server::builder();
+    let mut server = san_server();
     server.should_error();
     let server = server.build();
 
@@ -842,7 +862,7 @@ fn connector_can_disable_verify() {
 fn connector_does_use_sni_with_dnsnames() {
     static CALLED_BACK: AtomicBool = AtomicBool::new(false);
 
-    let mut builder = Server::builder();
+    let mut builder = san_server();
     builder.ctx().set_servername_callback(|ssl, _| {
         assert_eq!(ssl.servername(NameType::HOST_NAME), Some("foobar.com"));
         CALLED_BACK.store(true, Ordering::SeqCst);
@@ -899,7 +919,7 @@ fn test_mozilla_server(new: fn(SslMethod) -> Result<SslAcceptorBuilder, ErrorSta
 
     let t = thread::spawn(move || {
         let key = PKey::private_key_from_pem(KEY).unwrap();
-        let cert = X509::from_pem(CERT).unwrap();
+        let cert = X509::from_pem(SAN_CERT).unwrap();
         let mut acceptor = new(SslMethod::tls()).unwrap();
         acceptor.set_private_key(&key).unwrap();
         acceptor.set_certificate(&cert).unwrap();

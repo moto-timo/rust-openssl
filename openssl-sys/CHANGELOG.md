@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+* Added `DTLS1_3_VERSION`, for OpenSSL 4.1 and newer.
+
+### Fixed
+
+* `SSL_OP_TLSEXT_PADDING` is 0 on OpenSSL 4.1, which also removes it from `SSL_OP_ALL`, matching the headers.
+
 ## [v0.9.117] - 2026-06-12
 
 ### Added

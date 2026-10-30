@@ -4,6 +4,7 @@
 
 ### Added
 
+* Added `SslVersion::DTLS1_3`, for OpenSSL 4.1 and newer.
 * Added the full set of `SslAlert` alert descriptions, along with `SslAlert::reason_code`, `SslAlert::from_reason_code`, and a `Display` implementation.
 * Added `DsaRef::p_opt`, `DsaRef::q_opt`, and `DsaRef::g_opt`.
 

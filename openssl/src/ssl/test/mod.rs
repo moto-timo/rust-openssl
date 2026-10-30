@@ -42,7 +42,19 @@ mod server;
 
 static ROOT_CERT: &[u8] = include_bytes!("../../../test/root-ca.pem");
 static CERT: &[u8] = include_bytes!("../../../test/cert.pem");
+static SAN_CERT: &[u8] = include_bytes!("../../../test/cert_san.pem");
 static KEY: &[u8] = include_bytes!("../../../test/key.pem");
+
+/// A `Server` builder whose certificate names `foobar.com` in its
+/// subjectAltName, as hostname verification requires on OpenSSL 4.1 and newer.
+fn san_server() -> server::Builder {
+    let mut server = Server::builder();
+    server
+        .ctx()
+        .set_certificate_chain_file("test/cert_san.pem")
+        .unwrap();
+    server
+}
 
 #[test]
 fn verify_untrusted() {
@@ -374,6 +386,269 @@ fn peer_tmp_key_rsa() {
     assert_eq!(local_temp.bits(), 521);
 }
 
+/// A DTLS context limited to `min..=max`.
+#[cfg(ossl410)]
+fn dtls_ctx(min: Option<SslVersion>, max: Option<SslVersion>) -> SslContextBuilder {
+    let mut ctx = SslContext::builder(SslMethod::dtls()).unwrap();
+    ctx.set_min_proto_version(min).unwrap();
+    ctx.set_max_proto_version(max).unwrap();
+    ctx
+}
+
+/// A DTLS context limited to `min..=max`, with the test certificate and key.
+#[cfg(ossl410)]
+fn dtls_ctx_with_cert(min: Option<SslVersion>, max: Option<SslVersion>) -> SslContextBuilder {
+    let mut ctx = dtls_ctx(min, max);
+    ctx.set_certificate_file(Path::new("test/cert.pem"), SslFiletype::PEM)
+        .unwrap();
+    ctx.set_private_key_file(Path::new("test/key.pem"), SslFiletype::PEM)
+        .unwrap();
+    ctx
+}
+
+/// One side's negotiated DTLS version, as an `SslVersion` and as OpenSSL's name
+/// for it, or that side's handshake error.
+#[cfg(ossl410)]
+type Negotiated = Result<(SslVersion, &'static str), String>;
+
+/// Runs a DTLS handshake over loopback TCP and returns what each side
+/// negotiated.
+///
+/// On success the server sends one byte and then waits for one byte back, so
+/// neither side closes while the other may still send DTLS 1.3 ACKs.
+#[cfg(ossl410)]
+fn dtls_handshake(server: SslContext, client: SslContext) -> (Negotiated, Negotiated) {
+    let timeout = Some(Duration::from_secs(10));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let guard = thread::spawn(move || {
+        let stream = listener.accept().unwrap().0;
+        stream.set_read_timeout(timeout).unwrap();
+        let mut ssl = Ssl::new(&server).unwrap();
+        ssl.set_mtu(1500).unwrap();
+        let mut stream = ssl.accept(stream).map_err(|e| e.to_string())?;
+        let version = (stream.ssl().version2().unwrap(), stream.ssl().version_str());
+        stream.write_all(&[0]).unwrap();
+        stream.read_exact(&mut [0]).unwrap();
+        Ok(version)
+    });
+
+    let stream = TcpStream::connect(addr).unwrap();
+    stream.set_read_timeout(timeout).unwrap();
+    let mut ssl = Ssl::new(&client).unwrap();
+    ssl.set_mtu(1500).unwrap();
+    let client = ssl
+        .connect(stream)
+        .map(|mut stream| {
+            let version = (stream.ssl().version2().unwrap(), stream.ssl().version_str());
+            stream.read_exact(&mut [0]).unwrap();
+            stream.write_all(&[0]).unwrap();
+            version
+        })
+        .map_err(|e| e.to_string());
+
+    (guard.join().unwrap(), client)
+}
+
+#[test]
+#[cfg(ossl410)]
+fn dtls1_3_proto_version_bounds() {
+    let mut ctx = dtls_ctx(Some(SslVersion::DTLS1_3), Some(SslVersion::DTLS1_3));
+    assert_eq!(ctx.min_proto_version(), Some(SslVersion::DTLS1_3));
+    assert_eq!(ctx.max_proto_version(), Some(SslVersion::DTLS1_3));
+
+    let mut ssl = Ssl::new(&dtls_ctx(None, None).build()).unwrap();
+    ssl.set_min_proto_version(Some(SslVersion::DTLS1_3))
+        .unwrap();
+    ssl.set_max_proto_version(Some(SslVersion::DTLS1_3))
+        .unwrap();
+}
+
+#[test]
+#[cfg(ossl410)]
+fn dtls1_3() {
+    let pin = Some(SslVersion::DTLS1_3);
+    let (server, client) = dtls_handshake(
+        dtls_ctx_with_cert(pin, pin).build(),
+        dtls_ctx(pin, pin).build(),
+    );
+    assert_eq!(server, Ok((SslVersion::DTLS1_3, "DTLSv1.3")));
+    assert_eq!(client, Ok((SslVersion::DTLS1_3, "DTLSv1.3")));
+}
+
+#[test]
+#[cfg(ossl410)]
+fn dtls1_3_is_default() {
+    let (server, client) = dtls_handshake(
+        dtls_ctx_with_cert(None, None).build(),
+        dtls_ctx(None, None).build(),
+    );
+    assert_eq!(server, Ok((SslVersion::DTLS1_3, "DTLSv1.3")));
+    assert_eq!(client, Ok((SslVersion::DTLS1_3, "DTLSv1.3")));
+}
+
+#[test]
+#[cfg(ossl410)]
+fn dtls1_3_server_falls_back_to_dtls1_2() {
+    let (server, client) = dtls_handshake(
+        dtls_ctx_with_cert(None, None).build(),
+        dtls_ctx(None, Some(SslVersion::DTLS1_2)).build(),
+    );
+    assert_eq!(server, Ok((SslVersion::DTLS1_2, "DTLSv1.2")));
+    assert_eq!(client, Ok((SslVersion::DTLS1_2, "DTLSv1.2")));
+}
+
+#[test]
+#[cfg(ossl410)]
+fn dtls1_3_client_falls_back_to_dtls1_2() {
+    let (server, client) = dtls_handshake(
+        dtls_ctx_with_cert(None, Some(SslVersion::DTLS1_2)).build(),
+        dtls_ctx(None, None).build(),
+    );
+    assert_eq!(server, Ok((SslVersion::DTLS1_2, "DTLSv1.2")));
+    assert_eq!(client, Ok((SslVersion::DTLS1_2, "DTLSv1.2")));
+}
+
+#[test]
+#[cfg(ossl410)]
+fn dtls1_3_version_mismatch_fails() {
+    let (server, client) = dtls_handshake(
+        dtls_ctx_with_cert(Some(SslVersion::DTLS1_3), None).build(),
+        dtls_ctx(None, Some(SslVersion::DTLS1_2)).build(),
+    );
+    let server = server.unwrap_err();
+    assert!(server.contains("unsupported protocol"), "server: {server}");
+    let client = client.unwrap_err();
+    assert!(
+        client.contains("alert protocol version"),
+        "client: {client}"
+    );
+}
+
+/// A connected `UdpSocket` as a stream: each `write` sends one datagram and
+/// each `read` receives one.
+#[cfg(ossl410)]
+#[derive(Debug)]
+struct UdpStream(UdpSocket);
+
+#[cfg(ossl410)]
+impl Read for UdpStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.recv(buf)
+    }
+}
+
+#[cfg(ossl410)]
+impl Write for UdpStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.send(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A pair of loopback UDP sockets connected to each other.
+#[cfg(ossl410)]
+fn udp_pair() -> (UdpStream, UdpStream) {
+    let a = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let b = UdpSocket::bind("127.0.0.1:0").unwrap();
+    a.connect(b.local_addr().unwrap()).unwrap();
+    b.connect(a.local_addr().unwrap()).unwrap();
+    for s in [&a, &b] {
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    }
+    (UdpStream(a), UdpStream(b))
+}
+
+#[test]
+#[cfg(ossl410)]
+fn dtls1_3_udp_mutual_auth() {
+    let pin = Some(SslVersion::DTLS1_3);
+    let (server_sock, client_sock) = udp_pair();
+    // One record's worth of data, below the 1500-byte MTU.
+    let message: Vec<u8> = (0..1000).map(|i| i as u8).collect();
+
+    let guard = thread::spawn(move || {
+        let mut ctx = dtls_ctx_with_cert(pin, pin);
+        ctx.set_ca_file("test/root-ca.pem").unwrap();
+        ctx.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
+        let mut ssl = Ssl::new(&ctx.build()).unwrap();
+        ssl.set_mtu(1500).unwrap();
+        let mut stream = ssl.accept(server_sock).unwrap();
+        assert_eq!(stream.ssl().version2(), Some(SslVersion::DTLS1_3));
+        assert!(stream.ssl().peer_certificate().is_some());
+
+        let mut buf = vec![0; 1000];
+        stream.read_exact(&mut buf).unwrap();
+        stream.write_all(&buf).unwrap();
+        stream.read_exact(&mut [0]).unwrap();
+    });
+
+    let mut ctx = dtls_ctx_with_cert(pin, pin);
+    ctx.set_ca_file("test/root-ca.pem").unwrap();
+    ctx.set_verify(SslVerifyMode::PEER);
+    let mut ssl = Ssl::new(&ctx.build()).unwrap();
+    ssl.set_mtu(1500).unwrap();
+    let mut stream = ssl.connect(client_sock).unwrap();
+    assert_eq!(stream.ssl().version2(), Some(SslVersion::DTLS1_3));
+    assert_eq!(stream.ssl().version_str(), "DTLSv1.3");
+    assert_eq!(
+        stream.ssl().session().unwrap().protocol_version(),
+        SslVersion::DTLS1_3
+    );
+    assert_eq!(stream.ssl().verify_result(), X509VerifyResult::OK);
+
+    stream.write_all(&message).unwrap();
+    let mut echo = vec![0; 1000];
+    stream.read_exact(&mut echo).unwrap();
+    assert_eq!(echo, message);
+    stream.write_all(&[0]).unwrap();
+
+    guard.join().unwrap();
+}
+
+#[test]
+#[cfg(ossl410)]
+fn dtls1_3_missing_client_cert_fails() {
+    let pin = Some(SslVersion::DTLS1_3);
+    let (server_sock, client_sock) = udp_pair();
+
+    let guard = thread::spawn(move || {
+        let mut ctx = dtls_ctx_with_cert(pin, pin);
+        ctx.set_ca_file("test/root-ca.pem").unwrap();
+        ctx.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
+        let mut ssl = Ssl::new(&ctx.build()).unwrap();
+        ssl.set_mtu(1500).unwrap();
+        ssl.accept(server_sock)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    });
+
+    let mut ssl = Ssl::new(&dtls_ctx(pin, pin).build()).unwrap();
+    ssl.set_mtu(1500).unwrap();
+    // The server's rejection reaches the client during `connect` or, if the
+    // client has already completed its side, on the first read; accept either.
+    let client = ssl
+        .connect(client_sock)
+        .map_err(|e| e.to_string())
+        .and_then(|mut stream| stream.read_exact(&mut [0]).map_err(|e| e.to_string()));
+
+    let server = guard.join().unwrap();
+    let server = server.unwrap_err();
+    assert!(
+        server.contains("peer did not return a certificate"),
+        "server: {server}"
+    );
+    let client = client.unwrap_err();
+    assert!(
+        client.contains("alert certificate required"),
+        "client: {client}"
+    );
+}
+
 /// Tests that when both the client as well as the server use SRTP and their
 /// lists of supported protocols have an overlap -- with only ONE protocol
 /// being valid for both.
@@ -402,6 +677,9 @@ fn test_connect_with_srtp_ctx() {
             .unwrap();
 
         stream.write_all(&[0]).unwrap();
+        // Hold the stream open until the client is done: under DTLS 1.3 its
+        // read sends ACKs, which fail with EPIPE if this side has closed.
+        stream.read_exact(&mut [0]).unwrap();
 
         buf
     });
@@ -426,6 +704,7 @@ fn test_connect_with_srtp_ctx() {
         .expect("extract");
 
     stream.read_exact(&mut [0]).unwrap();
+    stream.write_all(&[0]).unwrap();
 
     let buf2 = guard.join().unwrap();
 
@@ -471,6 +750,9 @@ fn test_connect_with_srtp_ssl() {
             .unwrap();
 
         stream.write_all(&[0]).unwrap();
+        // Hold the stream open until the client is done: under DTLS 1.3 its
+        // read sends ACKs, which fail with EPIPE if this side has closed.
+        stream.read_exact(&mut [0]).unwrap();
 
         buf
     });
@@ -495,6 +777,7 @@ fn test_connect_with_srtp_ssl() {
         .expect("extract");
 
     stream.read_exact(&mut [0]).unwrap();
+    stream.write_all(&[0]).unwrap();
 
     let buf2 = guard.join().unwrap();
 
@@ -726,7 +1009,7 @@ fn add_extra_chain_cert() {
 #[test]
 #[cfg(ossl110)]
 fn verify_valid_hostname() {
-    let server = Server::builder().build();
+    let server = san_server().build();
 
     let mut client = server.client();
     client.ctx().set_ca_file("test/root-ca.pem").unwrap();
@@ -744,7 +1027,7 @@ fn verify_valid_hostname() {
 #[test]
 #[cfg(ossl110)]
 fn verify_invalid_hostname() {
-    let mut server = Server::builder();
+    let mut server = san_server();
     server.should_error();
     let server = server.build();
 
@@ -763,7 +1046,7 @@ fn verify_invalid_hostname() {
 
 #[test]
 fn connector_valid_hostname() {
-    let server = Server::builder().build();
+    let server = san_server().build();
 
     let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
     connector.set_ca_file("test/root-ca.pem").unwrap();
@@ -775,7 +1058,7 @@ fn connector_valid_hostname() {
 
 #[test]
 fn connector_invalid_hostname() {
-    let mut server = Server::builder();
+    let mut server = san_server();
     server.should_error();
     let server = server.build();
 
@@ -842,7 +1125,7 @@ fn connector_can_disable_verify() {
 fn connector_does_use_sni_with_dnsnames() {
     static CALLED_BACK: AtomicBool = AtomicBool::new(false);
 
-    let mut builder = Server::builder();
+    let mut builder = san_server();
     builder.ctx().set_servername_callback(|ssl, _| {
         assert_eq!(ssl.servername(NameType::HOST_NAME), Some("foobar.com"));
         CALLED_BACK.store(true, Ordering::SeqCst);
@@ -899,7 +1182,7 @@ fn test_mozilla_server(new: fn(SslMethod) -> Result<SslAcceptorBuilder, ErrorSta
 
     let t = thread::spawn(move || {
         let key = PKey::private_key_from_pem(KEY).unwrap();
-        let cert = X509::from_pem(CERT).unwrap();
+        let cert = X509::from_pem(SAN_CERT).unwrap();
         let mut acceptor = new(SslMethod::tls()).unwrap();
         acceptor.set_private_key(&key).unwrap();
         acceptor.set_certificate(&cert).unwrap();

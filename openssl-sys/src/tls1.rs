@@ -12,6 +12,8 @@ pub const TLS1_3_VERSION: c_int = 0x304;
 
 pub const DTLS1_VERSION: c_int = 0xFEFF;
 pub const DTLS1_2_VERSION: c_int = 0xFEFD;
+#[cfg(ossl410)]
+pub const DTLS1_3_VERSION: c_int = 0xFEFC;
 
 pub const TLS1_AD_DECODE_ERROR: c_int = 50;
 pub const TLS1_AD_UNRECOGNIZED_NAME: c_int = 112;
